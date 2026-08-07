@@ -366,18 +366,14 @@ class MainWindow(QMainWindow):
         return True
 
     def import_wave2mediapool(self, media_pool, f: Path, start_time, step, time_out):
-        mi_list = media_pool.ImportMedia(str(f))
-        if mi_list and len(mi_list) > 0:
-            return mi_list[0]
-
         while True:
+            mi_list = media_pool.ImportMedia(str(f))
+            if mi_list and len(mi_list) > 0:
+                return mi_list[0]
             if time.time() - start_time > time_out:
                 self.add2log('タイムアウト:音声ファイルのインポートに失敗しました。', log.ERROR_COLOR)
                 return None
             time.sleep(step)
-            mi_list = media_pool.ImportMedia(str(f))
-            if mi_list and len(mi_list) > 0:
-                return mi_list[0]
 
     def insert_audio_clip(
             self, media_pool, timeline,
@@ -390,27 +386,16 @@ class MainWindow(QMainWindow):
             "trackIndex": audio_index,
             "recordFrame": record_frame,
         }
-        _cnt = get_track_item_count(timeline, 'audio', audio_index)
-        clips = media_pool.AppendToTimeline([audio_info])
-        if clips and len(clips) > 0 and get_track_item_count(timeline, 'audio', audio_index) > _cnt:
-            self.add2log('Insert Audio Clip: Done')
-            return clips[0]
-
         while True:
+            clips = media_pool.AppendToTimeline([audio_info])
+            if clips and len(clips) > 0:
+                self.add2log('Insert Audio Clip: Done')
+                return clips[0]
+
             if time.time() - start_time > time_out:
                 self.add2log('タイムアウト:音声クリップの挿入に失敗しました。', log.ERROR_COLOR)
                 return None
             time.sleep(step)
-            if get_track_item_count(timeline, 'audio', audio_index) == _cnt:
-                mi.ReplaceClip(str(f))
-                clips = media_pool.AppendToTimeline([audio_info])
-                if clips and len(clips) > 0:
-                    break
-            else:
-                break
-
-        self.add2log('Insert Audio Clip: Done')
-        return clips[0] if clips else None
 
     def setup_text_plus(
             self, clip,
@@ -561,7 +546,7 @@ class MainWindow(QMainWindow):
                 return
 
             # time out 設定
-            step = 0.2
+            step = 0.02
             start_time = time.time()
 
             # ロック確認 VOICEPEAK用に出力待ち
