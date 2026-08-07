@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import wave
 from functools import partial
 
 import dataclasses
@@ -22,6 +23,10 @@ from PySide6.QtGui import (
     QColor,
 )
 
+try:
+    from watchdog.observers import Observer as NativeObserver
+except ImportError:
+    NativeObserver = None
 from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 
@@ -78,27 +83,32 @@ class ConfigData(config.Data):
     audio_index: int = 1
     make_text: bool = False
     use_chara: bool = True
+    is_compact: bool = False
 
 
 class WatchdogEvent(FileSystemEventHandler):
     def __init__(self, sig):
         super(WatchdogEvent, self).__init__()
         self.modified: Signal = sig
-        self.created_lst = []
+        self.pending_files = set()
+
+    def _handle_path(self, path_str: str):
+        p_obj = Path(path_str)
+        if p_obj.suffix.lower() == '.wav':
+            self.modified.emit([p_obj])
 
     def on_created(self, event):
-        src_path = Path(event.src_path)
-        # print('created', src_path)
-        if src_path.suffix.lower() in ['.wav', ]:
-            self.created_lst.append(src_path)
+        if not event.is_directory:
+            self._handle_path(event.src_path)
 
     def on_modified(self, event):
-        src_path = Path(event.src_path)
-        # print('modified', src_path)
-        if src_path.is_dir():
-            if len(self.created_lst) > 0:
-                self.modified.emit(self.created_lst.copy())
-                self.created_lst.clear()
+        if not event.is_directory:
+            self._handle_path(event.src_path)
+
+    def on_moved(self, event):
+        dest_path = getattr(event, 'dest_path', None)
+        if dest_path and not event.is_directory:
+            self._handle_path(dest_path)
 
 
 class MainWindow(QMainWindow):
@@ -116,16 +126,17 @@ class MainWindow(QMainWindow):
         )
         self.resize(350, 650)
         self.fusion = fusion
-
-        # config
-        self.config_file: Path = config.CONFIG_DIR.joinpath('%s.json' % APP_NAME)
-        self.load_config()
-
         data_dir: Path = config.DATA_PATH.joinpath('app', 'VoiceDropper')
         self.text_plus_dir_name: str = '__RS_TextPlus_FPS__'
         self.text_plus_drb: Path = data_dir.joinpath(self.text_plus_dir_name + '.drb')
         self.anim_setting: str = data_dir.joinpath('setting_base.txt').read_text(encoding='utf-8')
         self.anim_setting_mm: str = data_dir.joinpath('setting_aiueo_mm.txt').read_text(encoding='utf-8')
+
+        # cache
+        self._setting_cache = {}
+        self._processed_files = set()
+        self._file_queue = []
+        self._is_processing = False
 
         # window
         self.chara_window = CharaWindow(self)
@@ -133,7 +144,20 @@ class MainWindow(QMainWindow):
 
         # watcher
         self.modified.connect(self.directory_changed, Qt.QueuedConnection)
-        self.__observer = PollingObserver()
+        self.__observer = None
+        self.__create_observer()
+
+        # compact button
+        from PySide6.QtWidgets import QPushButton
+        self.compactButton = QPushButton('簡易', self)
+        self.compactButton.setMinimumSize(30, 30)
+        self.compactButton.setStyleSheet(appearance.other_stylesheet)
+        self.ui.horizontalLayout.insertWidget(2, self.compactButton)
+        self.compactButton.clicked.connect(lambda: self.toggle_compact())
+
+        # config
+        self.config_file: Path = config.CONFIG_DIR.joinpath('%s.json' % APP_NAME)
+        self.load_config()
 
         # style sheet
         self.ui.startButton.setStyleSheet(appearance.other_stylesheet)
@@ -160,6 +184,34 @@ class MainWindow(QMainWindow):
         self.make_dropper_folder()
         self.ui.closeButton.setFocus()
         self.start()
+
+    def toggle_compact(self, target_state=None):
+        if not isinstance(target_state, bool):
+            target_state = self.ui.groupBox.isVisible()
+
+        if target_state:
+            self.ui.groupBox.hide()
+            self.ui.groupBox_2.hide()
+            if hasattr(self, 'compactButton'):
+                self.compactButton.setText('詳細')
+            self.setMaximumHeight(130)
+            self.resize(340, 110)
+        else:
+            self.setMaximumHeight(16777215)
+            self.ui.groupBox.show()
+            self.ui.groupBox_2.show()
+            if hasattr(self, 'compactButton'):
+                self.compactButton.setText('簡易')
+            self.resize(350, 650)
+
+    def __create_observer(self):
+        if NativeObserver is not None:
+            try:
+                self.__observer = NativeObserver()
+                return
+            except Exception:
+                pass
+        self.__observer = PollingObserver()
 
     def open_lip_sync_window(self):
         if self.lip_sync_window is None:
@@ -188,7 +240,7 @@ class MainWindow(QMainWindow):
 
     def set_status_label(self):
         w = self.ui.statusLabel
-        if self.__observer.is_alive():
+        if self.__observer is not None and self.__observer.is_alive():
             w.setText(' 監視中 ')
             w.setStyleSheet('color: white; background-color: green;')
         else:
@@ -202,15 +254,22 @@ class MainWindow(QMainWindow):
         path = Path(data.voice_dir)
         if path.is_dir():
             self.stop()
-            self.__observer = PollingObserver()
-            self.__observer.schedule(
-                WatchdogEvent(self.modified), path=str(path), recursive=True
-            )
-            self.__observer.start()
+            self.__create_observer()
+            try:
+                self.__observer.schedule(
+                    WatchdogEvent(self.modified), path=str(path), recursive=True
+                )
+                self.__observer.start()
+            except Exception:
+                self.__observer = PollingObserver()
+                self.__observer.schedule(
+                    WatchdogEvent(self.modified), path=str(path), recursive=True
+                )
+                self.__observer.start()
         self.set_status_label()
 
     def stop(self):
-        if self.__observer.is_alive():
+        if self.__observer is not None and self.__observer.is_alive():
             self.__observer.stop()
             self.__observer.join()
         self.set_status_label()
@@ -244,14 +303,27 @@ class MainWindow(QMainWindow):
         media_pool.SetCurrentFolder(current_folder)
 
     def directory_changed(self, created_lst):
-        use_watchdog = self.__observer.is_alive()
-        if use_watchdog:
-            self.stop()
+        for f in created_lst:
+            f_path = Path(f)
+            if f_path.is_file() and f_path.suffix.lower() == '.wav':
+                if f_path not in self._processed_files and f_path not in self._file_queue:
+                    self._file_queue.append(f_path)
 
-        self.voice_drop(created_lst)
+        if not self._is_processing and len(self._file_queue) > 0:
+            self.process_queue()
 
-        if use_watchdog:
-            self.start()
+    def process_queue(self):
+        if self._is_processing:
+            return
+        self._is_processing = True
+        try:
+            while len(self._file_queue) > 0:
+                batch = self._file_queue.copy()
+                self._file_queue.clear()
+                self.voice_drop(batch)
+                QApplication.processEvents()
+        finally:
+            self._is_processing = False
 
     @staticmethod
     def setup_track(timeline, video_index, audio_index):
@@ -264,34 +336,48 @@ class MainWindow(QMainWindow):
             for i in range(audio_index - audio_size):
                 timeline.AddTrack('audio', 'stereo')
 
-    def wave_check(self, f, start_time, step, time_out) -> bool:
+    def wave_check(self, f: Path, start_time: float, step: float, time_out: int) -> bool:
         self.add2log('waveファイルチェック:  Start')
         while True:
             if time.time() - start_time > time_out:
                 self.add2log('タイムアウト:ファイルが計算中ため、処理をスキップします。', log.ERROR_COLOR)
                 return False
-            try:
-                os.rename(str(f), str(f))
-                break
-            except OSError:
+
+            if not f.is_file() or f.stat().st_size == 0:
                 time.sleep(step)
+                continue
+
+            if not util.IS_MAC:
+                try:
+                    os.rename(str(f), str(f))
+                except OSError:
+                    time.sleep(step)
+                    continue
+
+            try:
+                with wave.open(str(f), 'rb') as wf:
+                    if wf.getnframes() > 0:
+                        break
+            except Exception:
+                time.sleep(step)
+                continue
 
         self.add2log('waveファイルチェック:  OK')
         return True
 
     def import_wave2mediapool(self, media_pool, f: Path, start_time, step, time_out):
         mi_list = media_pool.ImportMedia(str(f))
+        if mi_list and len(mi_list) > 0:
+            return mi_list[0]
+
         while True:
             if time.time() - start_time > time_out:
                 self.add2log('タイムアウト:音声ファイルのインポートに失敗しました。', log.ERROR_COLOR)
                 return None
-            if len(mi_list) > 0:
-                break
-            else:
-                time.sleep(step)
-                mi_list = media_pool.ImportMedia(str(f))
-
-        return mi_list[0]
+            time.sleep(step)
+            mi_list = media_pool.ImportMedia(str(f))
+            if mi_list and len(mi_list) > 0:
+                return mi_list[0]
 
     def insert_audio_clip(
             self, media_pool, timeline,
@@ -305,7 +391,11 @@ class MainWindow(QMainWindow):
             "recordFrame": record_frame,
         }
         _cnt = get_track_item_count(timeline, 'audio', audio_index)
-        clip = media_pool.AppendToTimeline([audio_info])[0]
+        clips = media_pool.AppendToTimeline([audio_info])
+        if clips and len(clips) > 0 and get_track_item_count(timeline, 'audio', audio_index) > _cnt:
+            self.add2log('Insert Audio Clip: Done')
+            return clips[0]
+
         while True:
             if time.time() - start_time > time_out:
                 self.add2log('タイムアウト:音声クリップの挿入に失敗しました。', log.ERROR_COLOR)
@@ -313,12 +403,14 @@ class MainWindow(QMainWindow):
             time.sleep(step)
             if get_track_item_count(timeline, 'audio', audio_index) == _cnt:
                 mi.ReplaceClip(str(f))
-                clip = media_pool.AppendToTimeline([audio_info])[0]
+                clips = media_pool.AppendToTimeline([audio_info])
+                if clips and len(clips) > 0:
+                    break
             else:
                 break
 
         self.add2log('Insert Audio Clip: Done')
-        return clip
+        return clips[0] if clips else None
 
     def setup_text_plus(
             self, clip,
@@ -350,7 +442,14 @@ class MainWindow(QMainWindow):
         tool = lst[0]
 
         # settings
-        st = ordered_dict_to_dict(bmd.readfile(str(ch_data.setting_file)))
+        st_path_str = str(ch_data.setting_file)
+        if st_path_str in self._setting_cache:
+            st = self._setting_cache[st_path_str]
+        else:
+            st = ordered_dict_to_dict(bmd.readfile(st_path_str))
+            if st is not None:
+                self._setting_cache[st_path_str] = st
+
         if st is None:
             self.add2log(f'settingファイルの読み込みに失敗しました。:{str(ch_data.setting_file)}', log.ERROR_COLOR)
             return False
@@ -371,8 +470,14 @@ class MainWindow(QMainWindow):
     def voice_drop(self, created_lst):
         time_sta = time.time()
         self.ui.logTextEdit.clear()
-        if len(created_lst) == 0:
+
+        # get data
+        data = self.get_data()
+
+        unprocessed_files = [Path(f) for f in created_lst if Path(f) not in self._processed_files]
+        if len(unprocessed_files) == 0:
             return
+
         resolve = self.fusion.GetResolve()
         projectManager = resolve.GetProjectManager()
         project = projectManager.GetCurrentProject()
@@ -421,14 +526,11 @@ class MainWindow(QMainWindow):
             return
         self.add2log('Use %s' % text_template.GetClipProperty('Clip Name'))
 
-        # get data
-        data = self.get_data()
-
         # main
         resolve.OpenPage('edit')
         appender = Appender(resolve, media_pool)
         for f in p.pipe(
-                created_lst,
+                unprocessed_files,
                 p.filter(p.call.is_file()),
                 dict.fromkeys,
                 list,
@@ -515,6 +617,7 @@ class MainWindow(QMainWindow):
             timeline.SetClipsLinked([text_plus, clip], True)
 
             set_currentframe(timeline, current_frame + duration + data.offset + data.extend)
+            self._processed_files.add(f)
 
             # log
             self.add2log('Import: ' + str(f))
@@ -913,6 +1016,7 @@ class MainWindow(QMainWindow):
         self.ui.audioIndexSpinBox.setValue(c.audio_index)
         self.ui.makeTextCheckBox.setChecked(c.make_text)
         self.ui.useCharaCheckBox.setChecked(c.use_chara)
+        self.toggle_compact(c.is_compact)
 
     def get_data(self) -> ConfigData:
         c = ConfigData()
@@ -925,6 +1029,7 @@ class MainWindow(QMainWindow):
         c.audio_index = self.ui.audioIndexSpinBox.value()
         c.make_text = self.ui.makeTextCheckBox.isChecked()
         c.use_chara = self.ui.useCharaCheckBox.isChecked()
+        c.is_compact = not self.ui.groupBox.isVisible()
         return c
 
     def load_config(self) -> None:
