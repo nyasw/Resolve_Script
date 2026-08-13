@@ -402,7 +402,8 @@ class MainWindow(QMainWindow):
             ch_data: CharaData, txt_file: Path,
             width: int, height: int,
             make_text: bool
-    ) -> bool:
+    ):
+        """Text+の設定を行う。成功時はセリフ文字列を返し、失敗時はNoneを返す。"""
         self.add2log('Text Setup: Start')
         # text+用のテキストを読み込み
         if not txt_file.is_file() and make_text:
@@ -416,14 +417,14 @@ class MainWindow(QMainWindow):
         # comp
         if clip.GetFusionCompCount() == 0:
             self.add2log('FusionCompが見付かりません。', log.ERROR_COLOR)
-            return False
+            return None
         comp = clip.GetFusionCompByIndex(1)
 
         # tool
         lst = list(comp.GetToolList(False, 'TextPlus').values())
         if len(lst) == 0:
             self.add2log('Text+が見付かりません。', log.ERROR_COLOR)
-            return False
+            return None
         tool = lst[0]
 
         # settings
@@ -437,7 +438,7 @@ class MainWindow(QMainWindow):
 
         if st is None:
             self.add2log(f'settingファイルの読み込みに失敗しました。:{str(ch_data.setting_file)}', log.ERROR_COLOR)
-            return False
+            return None
 
         # apply
         comp.StartUndo('RS Jimaku')
@@ -450,7 +451,7 @@ class MainWindow(QMainWindow):
         comp.Unlock()
         comp.EndUndo(True)
         self.add2log('Text Setup: Done')
-        return True
+        return t
 
     def voice_drop(self, created_lst):
         time_sta = time.time()
@@ -585,15 +586,20 @@ class MainWindow(QMainWindow):
             self.add2log('Insert Text Clip: Done')
 
             # Text+の設定
-            if not self.setup_text_plus(
+            serif_text = self.setup_text_plus(
                     text_plus,
                     ch_data,
                     f.parent.joinpath(f.stem + '.txt'),
                     int(timeline.GetSetting('timelineResolutionWidth')),
                     int(timeline.GetSetting('timelineResolutionHeight')),
                     data.make_text,
-            ):
+            )
+            if serif_text is None:
                 continue
+
+            # タイムライン上のクリップ名をセリフの1行目に設定
+            clip_name = (serif_text.splitlines()[0].strip() if serif_text.strip() else f.stem)[:100]
+            text_plus.SetName(clip_name)
 
             # カラー、リンク、プレイヘッド
             if ch_data.color in config.COLOR_LIST:
