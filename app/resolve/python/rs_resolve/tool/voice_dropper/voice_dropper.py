@@ -409,10 +409,15 @@ class MainWindow(QMainWindow):
         if not txt_file.is_file() and make_text:
             self.add2log('テキストファイルを作成します。')
             txt_file.write_text(QApplication.clipboard().text(), encoding='utf-8-sig')
-        t = util.str2lines(
-            txt.read(txt_file, ch_data.c_code),
-            ch_data.str_width * 2,
-        ) if txt_file.is_file() else ''
+        if txt_file.is_file():
+            _raw = txt.read(txt_file, ch_data.c_code)
+            if '\\n' in _raw or '<br>' in _raw:
+                # リテラル \n / <br> を実際の改行に変換（str2lines による自動折り返しはスキップ）
+                t = _raw.replace('\\n', '\n').replace('<br>', '\n')
+            else:
+                t = util.str2lines(_raw, ch_data.str_width * 2)
+        else:
+            t = ''
 
         # comp
         if clip.GetFusionCompCount() == 0:
